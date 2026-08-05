@@ -2,9 +2,7 @@ import streamlit as st
 import cv2
 import mediapipe as mp
 import math
-import pygame
 import os
-import time
 import pandas as pd
 from datetime import datetime
 
@@ -15,8 +13,20 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize Pygame Mixer for Audio
-pygame.mixer.init()
+# Custom CSS for UI styling
+st.markdown("""
+    <style>
+    .main {
+        background-color: #0e1117;
+    }
+    .stMetric {
+        background-color: #1f2937;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # Initialize MediaPipe Face Mesh
 mp_face_mesh = mp.solutions.face_mesh
@@ -28,47 +38,62 @@ def get_distance(p1, p2):
 # Session State for Logs & Counters
 if "log_data" not in st.session_state:
     st.session_state.log_data = []
+if "alert_count" not in st.session_state:
+    st.session_state.alert_count = []
 
-# UI Styling & Header
+# Dashboard Header
 st.title("🚨 AI-Powered Driver Drowsiness & Safety Monitoring System")
+st.markdown("Monitor driver fatigue, eye closures, and head drops in real-time with advanced computer vision.")
 st.markdown("---")
 
 # Sidebar Controls
-st.sidebar.header("⚙️ System Control Panel")
-run_system = st.sidebar.checkbox("Start Live Monitoring", value=False)
+st.sidebar.header("⚙️ Control Panel")
+run_system = st.sidebar.toggle("🟢 Turn On Live Monitoring", value=False)
 
 st.sidebar.markdown("---")
-st.sidebar.info("This system tracks eye closure and head drops using MediaPipe and triggers an emergency alarm.")
+st.sidebar.info("💡 **Pro-Tip:** Ensure proper lighting on your face for optimal MediaPipe facial landmark tracking.")
 
-# Main Layout Columns
-col1, col2 = st.sidebar, None # Layout split
+# Metrics Row
+col1, col2, col3 = st.columns(3)
+with col1:
+    status_metric = st.empty()
+    status_metric.metric(label="System Status", value="Idle 😴" if not run_system else "Active 🟢")
+with col2:
+    alert_metric = st.empty()
+    alert_metric.metric(label="Total Alerts Triggered", value=len(st.session_state.log_data))
+with col3:
+    mode_metric = st.empty()
+    mode_metric.metric(label="Detection Mode", value="Eyes + Head Drop")
 
-video_placeholder = st.empty()
-status_placeholder = st.empty()
+st.markdown("---")
 
-# CSV Log file initialization
+# Main Feed & Logs layout
+video_col, log_col = st.columns([2, 1])
+
+with video_col:
+    st.subheader("📹 Live Camera Feed")
+    video_placeholder = st.empty()
+
+with log_col:
+    st.subheader("📊 Quick Session Stats")
+
 LOG_FILE = "drowsiness_logs.csv"
 
 def save_log(event_type, duration):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     new_entry = {"Timestamp": timestamp, "Event": event_type, "Duration (Frames)": duration}
     st.session_state.log_data.append(new_entry)
-    
-    # Save to CSV
     df = pd.DataFrame(st.session_state.log_data)
     df.to_csv(LOG_FILE, index=False)
 
 if run_system:
+    status_metric.metric(label="System Status", value="Active 🟢")
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     
     sleep_counter = 0
     no_face_counter = 0
     SLEEP_THRESHOLD = 20
     NO_FACE_THRESHOLD = 15
-
-    alarm_sound = None
-    if os.path.exists("alarm.wav"):
-        alarm_sound = pygame.mixer.Sound("alarm.wav")
 
     while run_system:
         success, frame = cap.read()
@@ -97,7 +122,6 @@ if run_system:
                 if right_eye_dist < 10 and left_eye_dist < 10:
                     eyes_closed = True
 
-        # Logic tracking
         if eyes_closed:
             sleep_counter += 1
         else:
@@ -108,54 +132,38 @@ if run_system:
         else:
             no_face_counter = 0
 
-        # Trigger Actions
         if sleep_counter >= SLEEP_THRESHOLD or no_face_counter >= NO_FACE_THRESHOLD:
             alert_msg = "ALERT: EYES CLOSED!" if sleep_counter >= SLEEP_THRESHOLD else "ALERT: HEAD DROPPED / NO FACE!"
             cv2.putText(frame, alert_msg, (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
             
-            if alarm_sound and not pygame.mixer.get_busy():
-                alarm_sound.play(-1)
-            
-            # Log event
             save_log(alert_msg, sleep_counter if sleep_counter >= SLEEP_THRESHOLD else no_face_counter)
+            alert_metric.metric(label="Total Alerts Triggered", value=len(st.session_state.log_data))
         else:
-            if alarm_sound:
-                alarm_sound.stop()
             cv2.putText(frame, "Status: Safe & Active", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        # Convert frame to RGB for Streamlit display
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         video_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
 
-        # Stop condition if user unchecks the sidebar toggle
-        # (Streamlit loop control check)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
     cap.release()
-    if alarm_sound:
-        alarm_sound.stop()
-    cv2.destroyAllWindows()
 else:
-    video_placeholder.warning("⚠️ System is paused. Check 'Start Live Monitoring' in the sidebar to launch the dashboard.")
+    video_placeholder.info("👈 Toggle 'Turn On Live Monitoring' in the sidebar to activate the AI video feed.")
 
-# Session Logs & Summary Section
+# Bottom Section: Detailed Logs & Report Download
 st.markdown("---")
-st.subheader("📊 Session Drowsiness Logs & Report")
+st.subheader("📋 Detailed Session Drowsiness Logs")
 
 if os.path.exists(LOG_FILE):
     log_df = pd.read_csv(LOG_FILE)
     if not log_df.empty:
+        log_col.dataframe(log_df.tail(5), use_container_width=True)
         st.dataframe(log_df, use_container_width=True)
-        
-        # Download button for CSV report
         st.download_button(
-            label="📥 Download Session Report (CSV)",
+            label="📥 Download Full Session Report (.CSV)",
             data=log_df.to_csv(index=False).encode('utf-8'),
             file_name="drowsiness_session_report.csv",
             mime="text/csv",
         )
     else:
-        st.info("No drowsiness events logged in this session yet.")
+        st.info("No drowsiness events logged yet.")
 else:
-    st.info("No log file created yet.")
+    st.info("No log file generated yet.")
