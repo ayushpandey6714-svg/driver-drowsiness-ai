@@ -207,7 +207,7 @@ ctx = webrtc_streamer(
 # ==================== UPDATE METRICS & TRANSFER PENDING ALERTS TO SESSION STATE ====
 if ctx.state.playing:
     status_placeholder.metric("System Status", "🟢 Active")
-    if ctx.video_transformer:
+    if ctx.video_processor:
         # Transfer pending alerts from transformer (worker thread) into Streamlit session state (main thread)
         transformer = ctx.video_transformer
         if hasattr(transformer, "pending_alerts") and hasattr(transformer, "alert_lock"):
