@@ -1,5 +1,5 @@
-streamlit==1.32.0
-starlette==0.27.0
-opencv-python-headless
+streamlit==1.49.1
+opencv-python-headless==4.10.0.84
 mediapipe
 pandas
+numpy<2
