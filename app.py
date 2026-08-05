@@ -38,8 +38,6 @@ def get_distance(p1, p2):
 # Session State for Logs & Counters
 if "log_data" not in st.session_state:
     st.session_state.log_data = []
-if "alert_count" not in st.session_state:
-    st.session_state.alert_count = []
 
 # Dashboard Header
 st.title("🚨 AI-Powered Driver Drowsiness & Safety Monitoring System")
