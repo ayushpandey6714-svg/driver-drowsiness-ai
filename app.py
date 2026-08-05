@@ -4,8 +4,11 @@ import mediapipe as mp
 import math
 import av
 import threading
+import base64
+import os
 from datetime import datetime
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import streamlit.components.v1 as components
 
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
@@ -31,16 +34,35 @@ mp_face_mesh = mp.solutions.face_mesh
 def get_distance(p1, p2):
     return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
 
+# ==================== AUDIO HELPER ====================
+@st.cache_data
+def get_base64_audio(file_path):
+    """Read alarm.wav once and cache it as base64 so we don't re-read the file every rerun."""
+    if not os.path.exists(file_path):
+        return None
+    with open(file_path, "rb") as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
+
+ALARM_PATH = "alarm.wav"
+alarm_base64 = get_base64_audio(ALARM_PATH)
+
 # ==================== SESSION STATE ====================
 if "alert_log" not in st.session_state:
     st.session_state.alert_log = []
 if "total_alerts" not in st.session_state:
     st.session_state.total_alerts = 0
+if "play_alarm" not in st.session_state:
+    st.session_state.play_alarm = False
 
 # ==================== HEADER ====================
 st.markdown('<div class="main-header">🚨 AI Driver Drowsiness Monitor</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Real-time fatigue detection using browser camera | Cloud Compatible ☁️</div>', unsafe_allow_html=True)
 st.markdown("---")
+
+if alarm_base64 is None:
+    st.warning(f"⚠️ '{ALARM_PATH}' not found in the app folder — alarm sound will not play. "
+               f"Make sure alarm.wav is in the same directory as app.py.")
 
 # ==================== SIDEBAR ====================
 st.sidebar.header("⚙️ Control Panel")
@@ -56,7 +78,7 @@ st.sidebar.subheader("📊 About")
 st.sidebar.markdown("""
 - **Right Eye**: Landmarks 159-145  
 - **Left Eye**: Landmarks 386-374  
-- **Alert**: Red border + text  
+- **Alert**: Red border + text + sound  
 - **Safe**: Green border  
 """)
 
@@ -216,9 +238,21 @@ if ctx.state.playing:
                     alert = processor.pending_alerts.pop(0)
                     st.session_state.alert_log.append(alert)
                     st.session_state.total_alerts += 1
+                    st.session_state.play_alarm = True  # flag: play sound on this rerun
 
         alert_count_placeholder.metric("Total Alerts", st.session_state.total_alerts)
         fps_placeholder.metric("Frame Count", ctx.video_processor.frame_count)
+
+    # Play the alarm sound client-side (browser), not server-side.
+    # This only works via an HTML <audio> tag with the file embedded as base64 —
+    # pygame/playsound would try to play on the SERVER which has no speakers.
+    if st.session_state.play_alarm and alarm_base64:
+        components.html(f"""
+            <audio autoplay>
+                <source src="data:audio/wav;base64,{alarm_base64}" type="audio/wav">
+            </audio>
+        """, height=0)
+        st.session_state.play_alarm = False
 else:
     status_placeholder.metric("System Status", "⏳ Idle")
 
