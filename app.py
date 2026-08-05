@@ -25,7 +25,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== MEDIAPIPE SETUP (module-level helper) ====================
+# ==================== MEDIAPIPE SETUP (helper) ====
 mp_face_mesh = mp.solutions.face_mesh
 
 def get_distance(p1, p2):
@@ -94,7 +94,6 @@ class DrowsinessDetector(VideoTransformerBase):
         )
 
     def __del__(self):
-        # Ensure resources are released
         try:
             self.face_mesh.close()
         except Exception:
@@ -112,7 +111,7 @@ class DrowsinessDetector(VideoTransformerBase):
         eyes_closed = False
         face_detected = False
 
-        if results.multi_face_landmarks:
+        if results and getattr(results, "multi_face_landmarks", None):
             face_detected = True
             for face_landmarks in results.multi_face_landmarks:
                 # Right eye landmarks
@@ -205,7 +204,7 @@ ctx = webrtc_streamer(
     async_transform=True
 )
 
-# ==================== UPDATE METRICS & TRANSFER PENDING ALERTS TO SESSION STATE ====================
+# ==================== UPDATE METRICS & TRANSFER PENDING ALERTS TO SESSION STATE ====
 if ctx.state.playing:
     status_placeholder.metric("System Status", "🟢 Active")
     if ctx.video_transformer:
