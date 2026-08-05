@@ -5,7 +5,7 @@ import math
 import av
 import threading
 from datetime import datetime
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
@@ -73,7 +73,7 @@ mode_placeholder.metric("Detection", "Eyes + Face")
 fps_placeholder.metric("FPS", "—")
 
 # ==================== VIDEO PROCESSOR ====================
-class DrowsinessDetector(VideoTransformerBase):
+class DrowsinessDetector(VideoProcessorBase):
     def __init__(self):
         self.sleep_counter = 0
         self.no_face_counter = 0
@@ -99,7 +99,7 @@ class DrowsinessDetector(VideoTransformerBase):
         except Exception:
             pass
 
-    def transform(self, frame):
+    def recv(self, frame):
         self.frame_count += 1
         img = frame.to_ndarray(format="bgr24")
         h, w, _ = img.shape
@@ -198,27 +198,27 @@ st.caption("Click **START** to begin monitoring. Works on both local machine and
 
 ctx = webrtc_streamer(
     key="drowsiness-detection",
-    video_transformer_factory=DrowsinessDetector,
+    video_processor_factory=DrowsinessDetector,
     media_stream_constraints={"video": True, "audio": False},
     rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-    async_transform=True
+    async_processing=True
 )
 
 # ==================== UPDATE METRICS & TRANSFER PENDING ALERTS TO SESSION STATE ====
 if ctx.state.playing:
     status_placeholder.metric("System Status", "🟢 Active")
     if ctx.video_processor:
-        # Transfer pending alerts from transformer (worker thread) into Streamlit session state (main thread)
-        transformer = ctx.video_transformer
-        if hasattr(transformer, "pending_alerts") and hasattr(transformer, "alert_lock"):
-            with transformer.alert_lock:
-                while transformer.pending_alerts:
-                    alert = transformer.pending_alerts.pop(0)
+        # Transfer pending alerts from processor (worker thread) into Streamlit session state (main thread)
+        processor = ctx.video_processor
+        if hasattr(processor, "pending_alerts") and hasattr(processor, "alert_lock"):
+            with processor.alert_lock:
+                while processor.pending_alerts:
+                    alert = processor.pending_alerts.pop(0)
                     st.session_state.alert_log.append(alert)
                     st.session_state.total_alerts += 1
 
         alert_count_placeholder.metric("Total Alerts", st.session_state.total_alerts)
-        fps_placeholder.metric("Frame Count", ctx.video_transformer.frame_count)
+        fps_placeholder.metric("Frame Count", ctx.video_processor.frame_count)
 else:
     status_placeholder.metric("System Status", "⏳ Idle")
 
@@ -243,7 +243,7 @@ if st.session_state.alert_log:
         if st.button("🗑️ Clear Logs"):
             st.session_state.alert_log = []
             st.session_state.total_alerts = 0
-            st.experimental_rerun()
+            st.rerun()
 else:
     st.info("No alerts yet. Start monitoring to see logs here.")
 
