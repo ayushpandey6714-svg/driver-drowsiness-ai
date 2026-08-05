@@ -5,4 +5,3 @@ opencv-python-headless>=4.5
 av
 pandas
 numpy
-protobuf<4
