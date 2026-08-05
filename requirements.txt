@@ -1,7 +1,8 @@
 streamlit==1.49.1
-streamlit-webrtc
 opencv-python-headless==4.10.0.84
 mediapipe
 pandas
 numpy<2
+streamlit-webrtc
 av
+pygame
