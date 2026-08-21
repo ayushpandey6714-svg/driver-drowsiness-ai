@@ -1,0 +1,17 @@
+# AI Driver Safety & Attention Monitoring System
+# Requirements file - install with: pip install -r requirements.txt
+
+# Core Computer Vision Libraries
+opencv-python>=4.9.0
+mediapipe>=0.10.9
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Data Analysis and Reporting
+pandas>=2.0.0
+
+# Web-based UI Framework (Streamlit)
+streamlit>=1.28.0
+
+# Audio generation for alarms
+gTTS>=2.5.0
