@@ -1,41 +1,41 @@
-# 🚗 AI Driver Monitoring & Safety System
+# Driver Drowsiness Monitor
 
-An advanced real-time computer vision application built with **Streamlit**, **OpenCV**, and **MediaPipe**[cite: 3] to monitor driver attentiveness, detect drowsiness, track head pose / gaze[cite: 4, 5], and prevent accidents by triggering smart audio alarms.
+A small Streamlit computer-vision demo that estimates eye closure, head direction, and yawning using MediaPipe Face Mesh and OpenCV. It supports browser camera snapshots, image uploads, and sampled video analysis, with a downloadable CSV history.
 
----
+> **Safety:** This is an educational prototype, not a certified driver-monitoring or emergency-alert system. Do not rely on it to determine whether it is safe to drive.
 
-## 🌟 Key Features
+## Run locally
 
-* **Real-time Drowsiness Detection:** Calculates **Eye Aspect Ratio (EAR)** to detect prolonged eye closure/sleeping[cite: 2, 4].
-* **Distraction & Gaze Tracking:** Monitors head movements and gaze directions (Left, Right, Up, Down) to check if the driver is looking away from the road[cite: 4, 5].
-* **Yawn Detection:** Uses **Mouth Aspect Ratio (MAR)** to track frequent yawning and fatigue levels[cite: 4, 9].
-* **Dynamic Alert System:** Triggers automated audio alarms (`pygame` / custom sound) when drowsiness or distraction exceeds safe thresholds[cite: 1, 8].
-* **Session Analytics & Trip Reports:** Generates live metrics, tracks performance, auto-saves CSV reports locally, and allows instant downloads[cite: 1, 6].
-* **Interactive UI:** Built using Streamlit with dark-mode styling and dynamic status cards.
+Use Python 3.11, then install dependencies and start Streamlit:
 
----
+```bash
+python -m venv .venv
+# Windows: .venv\\Scripts\\activate
+# macOS/Linux: source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-## 🛠️ Tech Stack
+Open the local URL printed by Streamlit. Allow browser camera permission to take a snapshot, or upload an image/video. Video analysis samples frames to keep processing manageable; use the controls to adjust the sampling interval and maximum number of frames.
 
-* **Python**[cite: 7]
-* **Streamlit** (Web Framework)[cite: 1, 7]
-* **OpenCV** (Video Capture & Image Processing)[cite: 3, 7]
-* **MediaPipe** (Face Mesh & Landmark Extraction)[cite: 3, 7]
-* **NumPy & Pandas** (Data Processing & CSV Logging)[cite: 1, 7]
-* **Pygame** (Alarm Audio Management)
+## Deploy on Streamlit Community Cloud
 
----
+1. Push this repository to GitHub.
+2. In [Streamlit Community Cloud](https://share.streamlit.io/), create an app from the repository.
+3. Set the branch to `main` and the app entry point to `app.py` (or use the branch containing your changes until it is merged).
+4. Deploy. The app uses `requirements.txt` and `runtime.txt` to install dependencies and select Python 3.11.
 
-## 📁 Project Structure
+Streamlit Cloud runs in a remote server and cannot access a visitor's webcam directly. The app uses Streamlit's browser-based camera snapshot widget; upload a video if you need temporal, frame-by-frame analysis. It does not play an alarm through the visitor's speakers.
 
-```text
-├── app.py              # Main Streamlit dashboard application
-├── detector.py         # MediaPipe face mesh & frame processing[cite: 3]
-├── fatigue.py          # Fatigue index, EAR, MAR & gaze algorithms[cite: 4]
-├── blink.py            # Eye blink detection logic[cite: 2]
-├── yawn.py             # Yawn detection logic[cite: 9]
-├── head_pose.py        # Head pose estimation via solvePnP[cite: 5]
-├── utils.py            # Audio warnings & visual overlays[cite: 8]
-├── report.py           # Session data logger & CSV exporter[cite: 6]
-├── alarm.wav           # Warning sound effect
-└── requirements.txt    # Required python dependencies[cite: 7]
+## Privacy and limitations
+
+- Camera snapshots and uploaded images are analyzed in memory. Uploaded videos are written to a temporary file during decoding and removed afterward.
+- Video fatigue indicators are heuristic estimates and depend on face visibility, lighting, camera angle, and sampling rate.
+- Streamlit Cloud's filesystem is temporary. Reports are provided as a CSV download rather than being saved permanently on the server.
+
+## Project files
+
+- `app.py` — Streamlit interface, image/video input, visual results, and CSV export.
+- `detector.py` — MediaPipe Face Mesh setup and frame preprocessing.
+- `fatigue.py` — EAR, MAR, gaze, blink, yawn, and fatigue heuristics.

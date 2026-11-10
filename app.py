@@ -1,234 +1,235 @@
-import streamlit as st
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+import tempfile
+
 import cv2
-import time
-import pygame
-import os
 import numpy as np
 import pandas as pd
-from datetime import datetime
+import streamlit as st
+
 from detector import initialize_face_mesh, process_frame
 from fatigue import FatigueDetector
 
-@st.cache_resource
-def load_alarm_sound():
-    if not pygame.mixer.get_init():
-        pygame.mixer.init(frequency=44100, size=-16, channels=1)
-    
-    if os.path.exists("alarm.wav"):
-        return pygame.mixer.Sound("alarm.wav")
-    else:
-        duration = 0.2
-        sample_rate = 44100
-        t = np.linspace(0, duration, int(sample_rate * duration), False)
-        tone = np.sin(2 * np.pi * 880.0 * t) * 0.4
-        sound_array = (tone * 32767).astype(np.int16)
-        return pygame.sndarray.make_sound(sound_array)
 
-alarm_sound = load_alarm_sound()
+st.set_page_config(
+    page_title="Driver Drowsiness Monitor",
+    page_icon="🚗",
+    layout="wide",
+)
 
-# Page Setup
-st.set_page_config(page_title="AI Driver Monitoring System", layout="wide", initial_sidebar_state="expanded")
-
-# UI Styling
-st.markdown("""
+st.markdown(
+    """
     <style>
-    .stApp { background-color: #080c14; font-family: 'Inter', sans-serif; }
-    .main-header-container {
-        display: flex; align-items: center; justify-content: center;
-        background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-        border: 1px solid #1e293b; padding: 18px; border-radius: 16px; margin-bottom: 20px;
-    }
-    .main-header {
-        font-size: 26px; font-weight: 800;
-        background: linear-gradient(90deg, #38bdf8, #818cf8);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        letter-spacing: 2px; text-transform: uppercase;
-    }
-    .metric-card {
-        background: rgba(15, 23, 42, 0.75); border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 14px; padding: 16px 20px; margin-bottom: 14px;
-    }
-    .status-attentive {
-        background: rgba(16, 185, 129, 0.12); border: 1.5px solid #10b981; color: #34d399;
-        font-size: 18px; font-weight: 800; text-align: center; padding: 14px; border-radius: 12px; margin-bottom: 16px;
-    }
-    .status-drowsy {
-        background: rgba(239, 68, 68, 0.15); border: 1.5px solid #ef4444; color: #f87171;
-        font-size: 18px; font-weight: 800; text-align: center; padding: 14px; border-radius: 12px; margin-bottom: 16px;
-    }
-    .status-distracted {
-        background: rgba(245, 158, 11, 0.15); border: 1.5px solid #f59e0b; color: #fbbf24;
-        font-size: 18px; font-weight: 800; text-align: center; padding: 14px; border-radius: 12px; margin-bottom: 16px;
-    }
-    .card-label { color: #94a3b8; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-    .value-highlight { font-size: 30px; font-weight: 800; color: #38bdf8; }
-    .value-sub { font-size: 26px; font-weight: 700; color: #f3f4f6; }
-    .cam-off-box {
-        display: flex; flex-direction: column; align-items: center; justify-content: center;
-        height: 450px; background: rgba(15, 23, 42, 0.5); border: 2px dashed #1e293b;
-        border-radius: 16px; color: #64748b; font-size: 18px; font-weight: 600;
-    }
+      .stApp { background: #0b1020; }
+      .block-container { max-width: 1200px; padding-top: 2rem; }
+      [data-testid="stMetric"] { background: #111a2e; padding: 1rem; border-radius: 12px; }
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-# Header
-st.markdown('<div class="main-header-container"><div class="main-header">🚗 AI Driver Monitoring System</div></div>', unsafe_allow_html=True)
+st.title("🚗 Driver Drowsiness Monitor")
+st.caption(
+    "A demo that estimates eye closure, head direction, and yawning from images or video. "
+    "It is not a certified safety system and must not be used as a substitute for safe driving."
+)
 
-# Sidebar
-st.sidebar.markdown("### ⚙️ Control Panel")
-cam_index = st.sidebar.number_input("Camera Source Index", value=0, step=1)
-start_system = st.sidebar.toggle("Start Camera Feed", value=False)
-
-# Session State
 if "face_mesh" not in st.session_state:
     st.session_state.face_mesh = initialize_face_mesh()
-if "detector" not in st.session_state:
-    st.session_state.detector = FatigueDetector()
-if "session_logs" not in st.session_state:
-    st.session_state.session_logs = []
-if "start_time" not in st.session_state:
-    st.session_state.start_time = None
-if "distraction_start_time" not in st.session_state:
-    st.session_state.distraction_start_time = None
+if "logs" not in st.session_state:
+    st.session_state.logs = []
 
-col_video, col_stats = st.columns([2.3, 1])
 
-with col_video:
-    video_placeholder = st.empty()
+def analyze_frame(frame: np.ndarray, detector: FatigueDetector) -> tuple[np.ndarray, dict]:
+    """Run face landmarks and fatigue metrics on one BGR frame."""
+    processed, results = process_frame(frame, st.session_state.face_mesh)
+    faces = getattr(results, "multi_face_landmarks", None)
+    landmarks = faces[0].landmark if faces else None
+    metrics = detector.process_landmarks(landmarks, processed.shape)
 
-with col_stats:
-    status_placeholder = st.empty()
-    fatigue_placeholder = st.empty()
-    metrics_placeholder = st.empty()
-    gaze_placeholder = st.empty()
+    if landmarks:
+        height, width = processed.shape[:2]
+        xs = [int(point.x * width) for point in landmarks]
+        ys = [int(point.y * height) for point in landmarks]
+        x1, x2 = max(0, min(xs)), min(width - 1, max(xs))
+        y1, y2 = max(0, min(ys)), min(height - 1, max(ys))
+        color = (40, 200, 120) if metrics["status"] == "ATTENTIVE" else (40, 70, 235)
+        cv2.rectangle(processed, (x1, y1), (x2, y2), color, 2)
+        for index in (33, 133, 362, 263, 61, 291, 1):
+            point = landmarks[index]
+            cv2.circle(processed, (int(point.x * width), int(point.y * height)), 3, (0, 220, 255), -1)
 
-if start_system:
-    if st.session_state.start_time is None:
-        st.session_state.start_time = datetime.now()
-        st.session_state.session_logs = []  # Reset log for new session
+    cv2.putText(
+        processed,
+        metrics["status"],
+        (16, 32),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (40, 70, 235) if metrics["status"] != "ATTENTIVE" else (40, 200, 120),
+        2,
+        cv2.LINE_AA,
+    )
+    return cv2.cvtColor(processed, cv2.COLOR_BGR2RGB), metrics
 
-    cap = cv2.VideoCapture(cam_index)
-    prev_time = time.time()
 
-    while cap.isOpened() and start_system:
-        ret, frame = cap.read()
-        if not ret:
-            st.error("Failed to fetch camera feed.")
-            break
+def add_log(source: str, frame_number: int | str, metrics: dict) -> None:
+    st.session_state.logs.append(
+        {
+            "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Source": source,
+            "Frame": frame_number,
+            "Status": metrics["status"],
+            "Gaze": metrics["gaze"],
+            "EAR": metrics["ear"],
+            "MAR": metrics["mar"],
+            "Fatigue index": metrics["fatigue_index"],
+            "Blinks": metrics["blinks"],
+            "Yawns": metrics["yawns"],
+        }
+    )
 
-        frame, results = process_frame(frame, st.session_state.face_mesh)
-        
-        curr_time = time.time()
-        fps = 1.0 / (curr_time - prev_time) if (curr_time - prev_time) > 0 else 30
-        prev_time = curr_time
 
-        if results.multi_face_landmarks:
-            landmarks = results.multi_face_landmarks[0].landmark
-            status_data = st.session_state.detector.process_landmarks(landmarks, frame.shape)
+def show_metrics(metrics: dict) -> None:
+    status = metrics["status"]
+    if status == "DROWSY":
+        st.error("🚨 Drowsiness indicators detected")
+    elif status in ("DISTRACTED", "NO FACE DETECTED"):
+        st.warning(f"⚠️ {status}")
+    else:
+        st.success("✅ No drowsiness indicators detected in this sample")
+
+    cols = st.columns(5)
+    cols[0].metric("Fatigue index", f'{metrics["fatigue_index"]:.2f}')
+    cols[1].metric("Eye aspect ratio", f'{metrics["ear"]:.3f}')
+    cols[2].metric("Mouth aspect ratio", f'{metrics["mar"]:.3f}')
+    cols[3].metric("Blinks", metrics["blinks"])
+    cols[4].metric("Yawns", metrics["yawns"])
+    st.write(f'**Gaze:** {metrics["gaze"]}')
+
+
+mode = st.radio(
+    "Choose an input",
+    ("Camera snapshot", "Upload image", "Upload video"),
+    horizontal=True,
+)
+
+if mode == "Camera snapshot":
+    st.info(
+        "The browser camera control takes a snapshot (it does not provide a continuous live stream). "
+        "For frame-by-frame monitoring, upload a video. Grant camera permission if prompted."
+    )
+    image_file = st.camera_input("Take a face snapshot")
+    if image_file and st.button("Analyze snapshot", type="primary"):
+        image = cv2.imdecode(np.frombuffer(image_file.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            st.error("Could not read the captured image. Please take another snapshot.")
         else:
-            status_data = st.session_state.detector.process_landmarks(None, frame.shape)
+            annotated, metrics = analyze_frame(image, FatigueDetector())
+            left, right = st.columns([1.4, 1])
+            with left:
+                st.image(annotated, caption="Analyzed snapshot", use_container_width=True)
+            with right:
+                show_metrics(metrics)
+            add_log("Camera snapshot", "-", metrics)
 
-        # Record Log Entry
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        st.session_state.session_logs.append({
-            "Time": timestamp,
-            "Status": status_data["status"],
-            "Gaze": status_data["gaze"],
-            "EAR": status_data["ear"],
-            "MAR": status_data["mar"],
-            "Fatigue Index": status_data["fatigue_index"]
-        })
-
-        # --- REALISTIC ALARM TRIGGER LOGIC ---
-        curr_status = status_data["status"]
-        
-        if curr_status == "DROWSY":
-            st.session_state.distraction_start_time = None
-            if not pygame.mixer.get_busy():
-                alarm_sound.play()
-                
-        elif curr_status in ["DISTRACTED", "NO FACE DETECTED"]:
-            if st.session_state.distraction_start_time is None:
-                st.session_state.distraction_start_time = time.time()
-            elif time.time() - st.session_state.distraction_start_time > 1.5:
-                if not pygame.mixer.get_busy():
-                    alarm_sound.play()
+elif mode == "Upload image":
+    image_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png", "webp"])
+    if image_file and st.button("Analyze image", type="primary"):
+        image = cv2.imdecode(np.frombuffer(image_file.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            st.error("Could not read this image. Try a JPG or PNG file.")
         else:
-            st.session_state.distraction_start_time = None
-            pygame.mixer.stop()
-
-        # Render FPS
-        cv2.putText(frame, f"FPS: {fps:.1f}", (frame.shape[1] - 150, 35),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
-
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        video_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
-
-        # Dynamic Status UI
-        if status_data["status"] == "DROWSY":
-            status_placeholder.markdown('<div class="status-drowsy">🚨 STATUS: DROWSY / SLEEPING!</div>', unsafe_allow_html=True)
-        elif status_data["status"] == "DISTRACTED":
-            status_placeholder.markdown('<div class="status-distracted">⚠️ STATUS: DISTRACTED!</div>', unsafe_allow_html=True)
-        elif status_data["status"] == "NO FACE DETECTED":
-            status_placeholder.markdown('<div class="status-distracted">⚠️ WARNING: NO FACE DETECTED!</div>', unsafe_allow_html=True)
-        else:
-            status_placeholder.markdown('<div class="status-attentive">✅ STATUS: ATTENTIVE</div>', unsafe_allow_html=True)
-
-        # Dynamic Cards UI
-        fatigue_placeholder.markdown(f'<div class="metric-card"><div class="card-label">Fatigue Index</div><div class="value-highlight">{status_data["fatigue_index"]:.2f}</div></div>', unsafe_allow_html=True)
-        metrics_placeholder.markdown(f'<div style="display: flex; gap: 12px;"><div class="metric-card" style="flex: 1;"><div class="card-label">Blinks</div><div class="value-sub">{status_data["blinks"]}</div></div><div class="metric-card" style="flex: 1;"><div class="card-label">Yawns</div><div class="value-sub">{status_data["yawns"]}</div></div></div>', unsafe_allow_html=True)
-        gaze_placeholder.markdown(f'<div class="metric-card"><div class="card-label">Gaze Tracking</div><div class="value-highlight">{status_data["gaze"]}</div></div>', unsafe_allow_html=True)
-
-    cap.release()
+            annotated, metrics = analyze_frame(image, FatigueDetector())
+            left, right = st.columns([1.4, 1])
+            with left:
+                st.image(annotated, caption="Analyzed image", use_container_width=True)
+            with right:
+                show_metrics(metrics)
+            add_log(image_file.name, "-", metrics)
 
 else:
-    # Idle Screen
-    video_placeholder.markdown('''
-        <div class="cam-off-box">
-            <p>📷 Camera is currently OFF</p>
-            <p style="font-size: 14px; color: #475569;">Toggle 'Start Camera Feed' in sidebar to begin</p>
-        </div>
-    ''', unsafe_allow_html=True)
+    video_file = st.file_uploader("Choose a video", type=["mp4", "mov", "avi", "mkv"])
+    sample_every = st.slider("Analyze every Nth frame", min_value=1, max_value=30, value=5)
+    max_samples = st.slider("Maximum analyzed frames", min_value=30, max_value=600, value=180, step=30)
 
-    status_placeholder.markdown('<div class="status-attentive" style="border-color:#334155; color:#94a3b8; background:rgba(30,41,59,0.3);">⏸️ SYSTEM IDLE</div>', unsafe_allow_html=True)
-    fatigue_placeholder.markdown('<div class="metric-card"><div class="card-label">Fatigue Index</div><div class="value-highlight">0.00</div></div>', unsafe_allow_html=True)
-    metrics_placeholder.markdown('<div style="display: flex; gap: 12px;"><div class="metric-card" style="flex: 1;"><div class="card-label">Blinks</div><div class="value-sub">0</div></div><div class="metric-card" style="flex: 1;"><div class="card-label">Yawns</div><div class="value-sub">0</div></div></div>', unsafe_allow_html=True)
-    gaze_placeholder.markdown('<div class="metric-card"><div class="card-label">Gaze Tracking</div><div class="value-highlight">OFF</div></div>', unsafe_allow_html=True)
+    if video_file and st.button("Analyze video", type="primary"):
+        suffix = Path(video_file.name).suffix or ".mp4"
+        video_path = None
+        cap = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_video:
+                temp_video.write(video_file.getvalue())
+                video_path = temp_video.name
 
-    # GENERATE REPORT SECTION WHEN CAMERA STOPS
-    if len(st.session_state.session_logs) > 0:
-        st.markdown("---")
-        st.subheader("📊 Session Analytics & Trip Report")
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                st.error("Could not open this video. Please try an MP4 encoded with H.264.")
+            else:
+                detector = FatigueDetector()
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                progress = st.progress(0, text="Analyzing video…")
+                preview = st.empty()
+                sampled = []
+                frame_index = 0
+                processed_count = 0
 
-        df = pd.DataFrame(st.session_state.session_logs)
-        
-        total_frames = len(df)
-        drowsy_count = len(df[df["Status"] == "DROWSY"])
-        distracted_count = len(df[df["Status"] == "DISTRACTED"])
-        avg_fatigue = df["Fatigue Index"].mean()
+                while processed_count < max_samples:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    if frame_index % sample_every == 0:
+                        annotated, metrics = analyze_frame(frame, detector)
+                        sampled.append(metrics)
+                        add_log(video_file.name, frame_index, metrics)
+                        preview.image(annotated, caption=f"Analyzed frame {frame_index}", use_container_width=True)
+                        processed_count += 1
+                        if frame_count > 0:
+                            progress.progress(min(frame_index / frame_count, 1.0), text=f"Analyzed {processed_count} frames…")
+                    frame_index += 1
 
-        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
-        col_r1.metric("Total Recorded Frames", total_frames)
-        col_r2.metric("Drowsy Events", drowsy_count)
-        col_r3.metric("Distraction Events", distracted_count)
-        col_r4.metric("Avg Fatigue Score", f"{avg_fatigue:.2f}")
+                progress.empty()
+                if not sampled:
+                    st.warning("No video frames could be decoded.")
+                else:
+                    drowsy = sum(item["status"] == "DROWSY" for item in sampled)
+                    distracted = sum(item["status"] in ("DISTRACTED", "NO FACE DETECTED") for item in sampled)
+                    average_fatigue = float(np.mean([item["fatigue_index"] for item in sampled]))
+                    st.subheader("Video summary")
+                    summary_cols = st.columns(4)
+                    summary_cols[0].metric("Frames analyzed", len(sampled))
+                    summary_cols[1].metric("Drowsy samples", drowsy)
+                    summary_cols[2].metric("Distracted / no-face samples", distracted)
+                    summary_cols[3].metric("Average fatigue index", f"{average_fatigue:.2f}")
+                    st.caption("Results are estimates for the sampled frames; they are not a medical or driving-safety assessment.")
+        except Exception as exc:
+            st.error(f"Video analysis failed: {exc}")
+        finally:
+            if cap is not None:
+                cap.release()
+            if video_path and Path(video_path).exists():
+                Path(video_path).unlink(missing_ok=True)
 
-        os.makedirs("reports", exist_ok=True)
-        report_filename = f"reports/driver_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        df.to_csv(report_filename, index=False)
+if st.session_state.logs:
+    st.divider()
+    st.subheader("Analysis history")
+    history = pd.DataFrame(st.session_state.logs)
+    st.dataframe(history.tail(100), use_container_width=True, hide_index=True)
+    st.download_button(
+        "Download CSV report",
+        data=history.to_csv(index=False).encode("utf-8"),
+        file_name="driver_drowsiness_report.csv",
+        mime="text/csv",
+    )
+    if st.button("Clear analysis history"):
+        st.session_state.logs = []
+        st.rerun()
 
-        csv_data = df.to_csv(index=False).encode('utf-8')
-        
-        col_btn1, col_btn2 = st.columns([1, 2])
-        with col_btn1:
-            st.download_button(
-                label="📥 Download Session Report (CSV)",
-                data=csv_data,
-                file_name=os.path.basename(report_filename),
-                mime="text/csv"
-            )
-        with col_btn2:
-            st.success(f"✅ Report Auto-saved locally to `{report_filename}`")
-
-        with st.expander("🔍 View Raw Log Data"):
-            st.dataframe(df, use_container_width=True)
+with st.expander("Deployment and privacy notes"):
+    st.markdown(
+        "- On Streamlit Cloud, camera access is through the browser snapshot control; the server cannot access your computer's webcam directly.\n"
+        "- Uploaded media and camera snapshots are processed in the app session and are not intentionally saved to disk, except for a temporary video file removed after processing.\n"
+        "- For local use, run `streamlit run app.py` after installing `requirements.txt`.\n"
+        "- This project is an educational prototype, not a certified driver-monitoring or emergency-alert system."
+    )
