@@ -1,8 +1,8 @@
 # AURORA | Driver Attention System
 
-A dark, polished Streamlit computer-vision demo that estimates eye closure, gaze direction, and yawning using MediaPipe Face Mesh. It supports browser camera snapshots, image uploads, sampled video analysis, session metrics, CSV export, and an optional browser-generated alert tone.
+A dark Streamlit computer-vision demo for estimating eye closure, gaze direction, and yawning, with optional YOLOv8n object detection, browser-generated alarm UI, sampled video analysis, session metrics, and CSV export.
 
-> **Safety:** Educational prototype only. It is not a certified safety device, does not provide real-time driver monitoring on Streamlit Cloud, and must not be relied on to determine whether it is safe to drive.
+> **Safety:** Educational prototype only. It is not a certified safety device, does not provide real-time driver monitoring on Streamlit Cloud, and must not be relied on to decide whether it is safe to drive.
 
 ## Run locally
 
@@ -19,25 +19,27 @@ streamlit run app.py
 
 ## Deploy on Streamlit Community Cloud
 
-1. Push the repository to GitHub.
+1. Push this repository to GitHub.
 2. In [Streamlit Community Cloud](https://share.streamlit.io/), create an app from this repository.
 3. Choose branch `fix/streamlit-cloud-deployment` and entry point `app.py` (or merge this branch and choose `main`).
-4. Deploy; the app reads `requirements.txt` and `runtime.txt`.
+4. Deploy. The first dependency installation and first object-detector use may take longer than subsequent launches.
 
-Cloud does not have access to a visitor's computer webcam. The app uses Streamlit's browser snapshot camera control or uploaded media. Uploaded video is analyzed after submission and sampled to manage CPU use; it is not a real-time alarm system.
+## Object detection
 
-## Browser alarm
+Enable **YOLOv8n object detection** in the sidebar to detect common objects from the COCO dataset (for example, people, phones, cars, and bottles) and draw boxes/labels. It is optional and disabled by default to keep ordinary image analysis faster. On first use, Ultralytics downloads the small `yolov8n.pt` model weights; detection runs on CPU and can slow video processing. This general-purpose model is not a dedicated driver phone-use detector.
 
-The optional two-tone alarm is synthesized by the browser, so it can play through the visitor's speakers rather than the server's audio device. Browsers block sound autoplay in many cases: click **Enable / test alarm** to grant audio permission. The in-app volume control sets the web-audio gain, but actual loudness is also controlled by the browser and operating-system volume. Keep the page open. The sound is a convenience for this demo only, not a safety alert.
+## Browser alarm and Cloud limitations
+
+The optional alarm is synthesized by the visitor's browser, not the server. Click **Enable / test alarm** to allow browser audio. The gain control is capped for comfort; device and browser volume controls determine actual loudness. Streamlit Cloud cannot access a visitor's webcam. Its camera widget captures a snapshot, and uploaded videos are processed after submission, not continuously in real time.
 
 ## Privacy and limitations
 
 - Images are processed in memory. Video uses a temporary file while decoding and removes it afterward.
 - Reports are downloaded as CSV; Streamlit Cloud storage is ephemeral.
-- Results are heuristic and depend on lighting, face visibility, camera position, and video sampling.
+- Results are heuristic and depend on lighting, face visibility, camera position, object size, and video sampling.
 
 ## Files
 
-- `app.py` — Streamlit interface, media analysis, visualization, alarm UI, and CSV export.
+- `app.py` — Streamlit interface, media analysis, visualization, optional object detection/alarm, and CSV export.
 - `detector.py` — MediaPipe Face Mesh setup and frame preprocessing.
 - `fatigue.py` — EAR, MAR, gaze, blink, yawn, and fatigue heuristics.

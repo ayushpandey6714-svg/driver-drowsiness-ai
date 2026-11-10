@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 import tempfile
@@ -31,8 +32,7 @@ st.markdown(
     .eyebrow { color:var(--cyan);font:500 11px 'DM Mono',monospace;letter-spacing:2.2px;text-transform:uppercase; }
     .hero-title { color:#f5f8ff;font-size:clamp(28px,4vw,43px);font-weight:800;letter-spacing:-1.8px;margin:9px 0 5px; }
     .hero-copy { color:#9eacc2;font-size:14px;max-width:760px;line-height:1.7; }
-    .glass { border:1px solid #ffffff17;border-radius:18px;background:linear-gradient(145deg,#17233acc,#111a2acc);box-shadow:0 16px 38px #0003,inset 0 1px #ffffff0d; padding:18px 20px; }
-    .section-label { color:#9babbe;font:500 11px 'DM Mono',monospace;letter-spacing:1.7px;text-transform:uppercase;margin-bottom:10px; }
+    .section-label { color:#9babbe;font:500 11px 'DM Mono',monospace;letter-spacing:1.7px;text-transform:uppercase;margin:8px 0 10px; }
     .status-line { border:1px solid #57e4f23d;background:linear-gradient(110deg,#14343b,#131f30);color:#abf5ef;border-radius:13px;padding:13px 16px;font-weight:700;margin:10px 0 16px; }
     [data-testid="stMetric"] { background:linear-gradient(145deg,#18253acc,#121a2acc);border:1px solid #ffffff14;border-radius:15px;padding:14px 16px;box-shadow:0 9px 24px #0002; }
     [data-testid="stMetricLabel"] { color:#aab8cd !important; }
@@ -51,11 +51,10 @@ st.markdown(
 st.markdown(
     '<div class="hero"><div class="eyebrow">AURORA · DRIVER ATTENTION SYSTEM</div>'
     '<div class="hero-title">See the signals. Stay alert.</div>'
-    '<div class="hero-copy">A polished computer-vision demo for exploring eye closure, head direction, and yawning. '
-    'Analyze a camera snapshot, image, or sampled video with on-screen indicators and an optional browser alarm.</div></div>',
+    '<div class="hero-copy">A polished computer-vision demo for exploring eye closure, head direction, yawning, '
+    'and common objects. Analyze a camera snapshot, image, or sampled video.</div></div>',
     unsafe_allow_html=True,
 )
-
 st.warning("Educational prototype only — not a certified safety device. Never rely on this app to decide whether it is safe to drive.")
 
 if "face_mesh" not in st.session_state:
@@ -64,13 +63,22 @@ if "logs" not in st.session_state:
     st.session_state.logs = []
 
 
-def analyze_frame(frame: np.ndarray, detector: FatigueDetector) -> tuple[np.ndarray, dict]:
-    """Downscale large frames, run face landmarks, and draw a lightweight overlay."""
+@st.cache_resource(show_spinner="Loading the lightweight object detector…")
+def load_object_model():
+    """Load a pretrained small COCO detector once per Streamlit server."""
+    from ultralytics import YOLO
+
+    return YOLO("yolov8n.pt")
+
+
+def analyze_frame(frame: np.ndarray, detector: FatigueDetector, object_model=None, object_confidence: float = 0.35):
+    """Run face analysis and optional COCO object detection on a resized frame."""
     height, width = frame.shape[:2]
     longest = max(height, width)
     if longest > 960:
         scale = 960 / longest
         frame = cv2.resize(frame, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+
     processed, results = process_frame(frame, st.session_state.face_mesh)
     faces = getattr(results, "multi_face_landmarks", None)
     landmarks = faces[0].landmark if faces else None
@@ -88,10 +96,34 @@ def analyze_frame(frame: np.ndarray, detector: FatigueDetector) -> tuple[np.ndar
             point = landmarks[index]
             cv2.circle(processed, (int(point.x * width), int(point.y * height)), 3, (85, 225, 245), -1, cv2.LINE_AA)
 
-    return cv2.cvtColor(processed, cv2.COLOR_BGR2RGB), metrics
+    objects = Counter()
+    if object_model is not None:
+        predictions = object_model.predict(
+            source=processed,
+            imgsz=640,
+            conf=object_confidence,
+            device="cpu",
+            verbose=False,
+        )
+        if predictions and predictions[0].boxes is not None:
+            boxes = predictions[0].boxes
+            names = predictions[0].names
+            for box in boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().tolist())
+                class_id = int(box.cls[0].cpu().item())
+                confidence = float(box.conf[0].cpu().item())
+                label = names[class_id]
+                objects[label] += 1
+                color = (255, 177, 80)
+                cv2.rectangle(processed, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+                text = f"{label} {confidence:.2f}"
+                top = max(20, y1 - 8)
+                cv2.putText(processed, text, (x1, top), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+
+    return cv2.cvtColor(processed, cv2.COLOR_BGR2RGB), metrics, objects
 
 
-def log_result(source: str, frame_number: int | str, metrics: dict) -> None:
+def log_result(source: str, frame_number: int | str, metrics: dict, objects: Counter) -> None:
     st.session_state.logs.append(
         {
             "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -104,11 +136,12 @@ def log_result(source: str, frame_number: int | str, metrics: dict) -> None:
             "Fatigue index": metrics["fatigue_index"],
             "Blinks": metrics["blinks"],
             "Yawns": metrics["yawns"],
+            "Detected objects": "; ".join(f"{name}: {count}" for name, count in sorted(objects.items())),
         }
     )
 
 
-def show_result(metrics: dict) -> None:
+def show_result(metrics: dict, objects: Counter) -> None:
     status = metrics["status"]
     if status == "DROWSY":
         st.error("🚨 Drowsiness indicators detected")
@@ -123,42 +156,46 @@ def show_result(metrics: dict) -> None:
     cols[3].metric("Blinks", metrics["blinks"])
     cols[4].metric("Yawns", metrics["yawns"])
     st.markdown(f'<div class="status-line">◉ &nbsp; GAZE DIRECTION &nbsp; / &nbsp; {metrics["gaze"]}</div>', unsafe_allow_html=True)
+    if objects:
+        st.markdown("**Objects detected:** " + " · ".join(f"{name} × {count}" for name, count in sorted(objects.items())))
+    elif st.session_state.get("object_detection", False):
+        st.caption("No COCO objects detected above the selected confidence threshold.")
 
 
 def alarm_panel(alarm_needed: bool) -> None:
-    """Browser-generated two-tone alert; user click is required to satisfy autoplay rules."""
-    tone = """
+    """Offer a user-initiated browser siren with adjustable, capped gain."""
+    html = """
     <div style="font:14px Arial;color:#dce7f8;background:#111b2b;border:1px solid #ffffff20;border-radius:12px;padding:12px 14px">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         <span id="label">🔊 Optional browser alarm · adjust volume</span>
-        <input id="vol" type="range" min="10" max="100" value="90" style="accent-color:#ff637d">
+        <input id="vol" type="range" min="10" max="60" value="45" style="accent-color:#ff637d">
         <button id="start" style="border:0;border-radius:8px;padding:8px 12px;background:#ff637d;color:#180812;font-weight:700;cursor:pointer">Enable / test alarm</button>
         <button id="stop" style="border:1px solid #ffffff35;border-radius:8px;padding:8px 12px;background:#202d42;color:#e5edf8;cursor:pointer">Stop</button>
       </div>
-      <div style="color:#91a1bb;font-size:11px;margin-top:8px">The browser and device control actual speaker loudness. Keep this tab open; browser autoplay policies require a click before sound can play.</div>
+      <div style="color:#91a1bb;font-size:11px;margin-top:8px">Actual loudness depends on browser and device volume. A click is required before browser audio can play.</div>
     </div>
     <script>
     (() => {
       let ctx = null, timer = null, osc = null, gain = null, phase = 0;
-      const volume = () => Number(document.getElementById('vol').value) / 100;
+      const slider = document.getElementById('vol');
       const stop = () => { if (timer) clearInterval(timer); timer = null; if (osc) { try { osc.stop(); } catch(e) {} osc = null; } if (ctx) { ctx.close(); ctx = null; } document.getElementById('label').textContent = '🔊 Optional browser alarm · stopped'; };
       const start = async () => {
         stop(); ctx = new (window.AudioContext || window.webkitAudioContext)(); await ctx.resume();
         osc = ctx.createOscillator(); gain = ctx.createGain(); osc.type = 'square'; osc.frequency.value = 880; gain.gain.value = 0;
         osc.connect(gain); gain.connect(ctx.destination); osc.start(); phase = 0;
-        timer = setInterval(() => { if (!ctx || !gain) return; const active = phase % 8 < 3 || (phase % 8 >= 4 && phase % 8 < 7); gain.gain.setTargetAtTime(active ? Math.min(0.95, volume()) : 0, ctx.currentTime, 0.015); osc.frequency.setTargetAtTime(phase % 8 < 4 ? 880 : 660, ctx.currentTime, 0.02); phase++; }, 125);
+        timer = setInterval(() => { if (!ctx || !gain) return; const active = phase % 8 < 3 || (phase % 8 >= 4 && phase % 8 < 7); gain.gain.setTargetAtTime(active ? Math.min(0.55, Number(slider.value) / 100) : 0, ctx.currentTime, 0.02); osc.frequency.setTargetAtTime(phase % 8 < 4 ? 880 : 660, ctx.currentTime, 0.02); phase++; }, 125);
         document.getElementById('label').textContent = '🔊 Alarm enabled · adjust volume or stop';
       };
       document.getElementById('start').addEventListener('click', start);
       document.getElementById('stop').addEventListener('click', stop);
-      document.getElementById('vol').addEventListener('input', () => { if (gain && ctx) gain.gain.setTargetAtTime(Math.min(0.95, volume()), ctx.currentTime, 0.02); });
+      slider.addEventListener('input', () => { if (gain && ctx) gain.gain.setTargetAtTime(Math.min(0.55, Number(slider.value) / 100), ctx.currentTime, 0.02); });
       window.addEventListener('pagehide', stop);
     })();
     </script>
     """
-    components.html(tone, height=105, scrolling=False)
+    components.html(html, height=105, scrolling=False)
     if alarm_needed:
-        st.info("A drowsiness-related signal was found. Click **Enable / test alarm** above if you want to hear the browser alert.")
+        st.info("A drowsiness-related signal was found. Click **Enable / test alarm** if you want to hear the browser alert.")
 
 
 with st.sidebar:
@@ -167,12 +204,16 @@ with st.sidebar:
     mode = st.radio("Input source", ("Camera snapshot", "Upload image", "Upload video"), label_visibility="collapsed")
     st.divider()
     st.markdown("#### Analysis profile")
-    st.caption("Large images are resized for faster inference. Video is sampled to limit CPU use.")
+    object_detection = st.toggle("Enable object detection (YOLOv8n)", value=False, help="Detect common COCO objects such as people, phones, cars, and bottles. First use downloads a small pretrained model.")
+    st.session_state.object_detection = object_detection
+    object_confidence = st.slider("Object confidence", 0.15, 0.80, 0.35, 0.05, disabled=not object_detection)
     if mode == "Upload video":
         sample_every = st.slider("Sample every N frames", 1, 30, 5)
         max_samples = st.slider("Maximum sampled frames", 30, 300, 120, step=30)
     else:
         sample_every, max_samples = 5, 120
+    if object_detection:
+        st.caption("YOLO runs on CPU and can make video analysis slower. Disable it for faster processing.")
 
 st.markdown('<div class="section-label">01 / Select media</div>', unsafe_allow_html=True)
 if mode == "Camera snapshot":
@@ -183,15 +224,17 @@ if mode == "Camera snapshot":
         if image is None:
             st.error("Could not read the captured image. Please take another snapshot.")
         else:
-            annotated, metrics = analyze_frame(image, FatigueDetector())
+            with st.spinner("Analyzing snapshot…"):
+                model = load_object_model() if object_detection else None
+                annotated, metrics, objects = analyze_frame(image, FatigueDetector(), model, object_confidence)
             st.markdown('<div class="section-label">02 / Analysis</div>', unsafe_allow_html=True)
             left, right = st.columns([1.3, 1])
             with left:
-                st.image(annotated, caption="Face landmarks · analyzed snapshot", use_container_width=True)
+                st.image(annotated, caption="Face landmarks and object detections", use_container_width=True)
             with right:
-                show_result(metrics)
+                show_result(metrics, objects)
             alarm_panel(metrics["status"] in ("DROWSY", "DISTRACTED"))
-            log_result("Camera snapshot", "-", metrics)
+            log_result("Camera snapshot", "-", metrics, objects)
 
 elif mode == "Upload image":
     image_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png", "webp"])
@@ -200,15 +243,17 @@ elif mode == "Upload image":
         if image is None:
             st.error("Could not read this image. Try a JPG or PNG file.")
         else:
-            annotated, metrics = analyze_frame(image, FatigueDetector())
+            with st.spinner("Analyzing image…"):
+                model = load_object_model() if object_detection else None
+                annotated, metrics, objects = analyze_frame(image, FatigueDetector(), model, object_confidence)
             st.markdown('<div class="section-label">02 / Analysis</div>', unsafe_allow_html=True)
             left, right = st.columns([1.3, 1])
             with left:
-                st.image(annotated, caption="Face landmarks · analyzed image", use_container_width=True)
+                st.image(annotated, caption="Face landmarks and object detections", use_container_width=True)
             with right:
-                show_result(metrics)
+                show_result(metrics, objects)
             alarm_panel(metrics["status"] in ("DROWSY", "DISTRACTED"))
-            log_result(image_file.name, "-", metrics)
+            log_result(image_file.name, "-", metrics, objects)
 
 else:
     video_file = st.file_uploader("Choose a video", type=["mp4", "mov", "avi", "mkv"])
@@ -225,27 +270,30 @@ else:
                 st.error("Could not open this video. Try a common MP4/H.264 file.")
             else:
                 detector = FatigueDetector()
+                object_model = load_object_model() if object_detection else None
                 frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 progress = st.progress(0, text="Preparing video analysis…")
                 preview = st.empty()
                 samples = []
+                aggregate_objects = Counter()
                 frame_index = 0
                 sampled_count = 0
-                while sampled_count < max_samples:
-                    ok, frame = cap.read()
-                    if not ok:
-                        break
-                    if frame_index % sample_every == 0:
-                        annotated, metrics = analyze_frame(frame, detector)
-                        samples.append(metrics)
-                        log_result(video_file.name, frame_index, metrics)
-                        sampled_count += 1
-                        # Update preview/progress periodically to avoid slow UI rerenders.
-                        if sampled_count == 1 or sampled_count % 5 == 0:
-                            preview.image(annotated, caption=f"Sampled frame {frame_index}", use_container_width=True)
-                        if frame_count > 0 and (sampled_count == 1 or sampled_count % 5 == 0):
-                            progress.progress(min(frame_index / frame_count, 1.0), text=f"Analyzed {sampled_count} frames")
-                    frame_index += 1
+                with st.spinner("Processing video samples…"):
+                    while sampled_count < max_samples:
+                        ok, frame = cap.read()
+                        if not ok:
+                            break
+                        if frame_index % sample_every == 0:
+                            annotated, metrics, objects = analyze_frame(frame, detector, object_model, object_confidence)
+                            samples.append(metrics)
+                            aggregate_objects.update(objects)
+                            log_result(video_file.name, frame_index, metrics, objects)
+                            sampled_count += 1
+                            if sampled_count == 1 or sampled_count % 5 == 0:
+                                preview.image(annotated, caption=f"Sampled frame {frame_index}", use_container_width=True)
+                                if frame_count > 0:
+                                    progress.progress(min(frame_index / frame_count, 1.0), text=f"Analyzed {sampled_count} frames")
+                        frame_index += 1
                 progress.empty()
                 if not samples:
                     st.warning("No frames could be decoded from this video.")
@@ -259,8 +307,10 @@ else:
                     cols[1].metric("Drowsy samples", drowsy)
                     cols[2].metric("Distracted / no face", distracted)
                     cols[3].metric("Average fatigue", f"{avg_fatigue:.2f}")
+                    if aggregate_objects:
+                        st.markdown("**Objects across sampled frames:** " + " · ".join(f"{name} × {count}" for name, count in sorted(aggregate_objects.items())))
                     alarm_panel(drowsy > 0 or any(item["status"] == "DISTRACTED" for item in samples))
-                    st.caption("Video is analyzed after upload; this is not a real-time warning system. Sample estimates depend on lighting, face visibility, and camera position.")
+                    st.caption("Video is analyzed after upload; this is not a real-time warning system. Estimates depend on lighting, face visibility, and sampling.")
         except Exception as exc:
             st.error(f"Video analysis failed: {exc}")
         finally:
@@ -282,10 +332,11 @@ if st.session_state.logs:
             st.session_state.logs = []
             st.rerun()
 
-with st.expander("Deployment, sound, and privacy"):
+with st.expander("Deployment, sound, object detection, and privacy"):
     st.markdown(
-        "- The alarm is generated in the visitor's browser, not on the Streamlit server. Click **Enable / test alarm** to satisfy browser audio permissions; set the slider and device volume to the desired level. Browser/OS settings ultimately control loudness.\n"
-        "- Since Cloud processes uploaded video after submission, an alert is not continuous or real time. The camera option captures a snapshot only.\n"
-        "- Images are processed in memory. Uploaded videos use a temporary file that is deleted after decoding. CSV reports are downloaded rather than saved permanently to Cloud.\n"
+        "- Object detection uses pretrained YOLOv8n / COCO labels, runs on CPU, and downloads model weights on first use. It can identify common classes but is not a dedicated driver-phone-use detector.\n"
+        "- Browser alarm is user-initiated; browser and device settings control real loudness. It is not a certified alert.\n"
+        "- Cloud cannot access a visitor's webcam directly. Camera input is a snapshot; uploaded video is analyzed after submission, not in real time.\n"
+        "- Images are processed in memory. Uploaded videos use a temporary file that is deleted afterward. CSV reports are downloaded rather than saved permanently to Cloud.\n"
         "- This demo can be inaccurate and must not be used to make driving or medical decisions."
     )
