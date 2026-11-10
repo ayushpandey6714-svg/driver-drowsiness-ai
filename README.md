@@ -1,12 +1,12 @@
-# Driver Drowsiness Monitor
+# AURORA | Driver Attention System
 
-A small Streamlit computer-vision demo that estimates eye closure, head direction, and yawning using MediaPipe Face Mesh and OpenCV. It supports browser camera snapshots, image uploads, and sampled video analysis, with a downloadable CSV history.
+A dark, polished Streamlit computer-vision demo that estimates eye closure, gaze direction, and yawning using MediaPipe Face Mesh. It supports browser camera snapshots, image uploads, sampled video analysis, session metrics, CSV export, and an optional browser-generated alert tone.
 
-> **Safety:** This is an educational prototype, not a certified driver-monitoring or emergency-alert system. Do not rely on it to determine whether it is safe to drive.
+> **Safety:** Educational prototype only. It is not a certified safety device, does not provide real-time driver monitoring on Streamlit Cloud, and must not be relied on to determine whether it is safe to drive.
 
 ## Run locally
 
-Use Python 3.11, then install dependencies and start Streamlit:
+Use Python 3.11:
 
 ```bash
 python -m venv .venv
@@ -17,25 +17,27 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Open the local URL printed by Streamlit. Allow browser camera permission to take a snapshot, or upload an image/video. Video analysis samples frames to keep processing manageable; use the controls to adjust the sampling interval and maximum number of frames.
-
 ## Deploy on Streamlit Community Cloud
 
-1. Push this repository to GitHub.
-2. In [Streamlit Community Cloud](https://share.streamlit.io/), create an app from the repository.
-3. Set the branch to `main` and the app entry point to `app.py` (or use the branch containing your changes until it is merged).
-4. Deploy. The app uses `requirements.txt` and `runtime.txt` to install dependencies and select Python 3.11.
+1. Push the repository to GitHub.
+2. In [Streamlit Community Cloud](https://share.streamlit.io/), create an app from this repository.
+3. Choose branch `fix/streamlit-cloud-deployment` and entry point `app.py` (or merge this branch and choose `main`).
+4. Deploy; the app reads `requirements.txt` and `runtime.txt`.
 
-Streamlit Cloud runs in a remote server and cannot access a visitor's webcam directly. The app uses Streamlit's browser-based camera snapshot widget; upload a video if you need temporal, frame-by-frame analysis. It does not play an alarm through the visitor's speakers.
+Cloud does not have access to a visitor's computer webcam. The app uses Streamlit's browser snapshot camera control or uploaded media. Uploaded video is analyzed after submission and sampled to manage CPU use; it is not a real-time alarm system.
+
+## Browser alarm
+
+The optional two-tone alarm is synthesized by the browser, so it can play through the visitor's speakers rather than the server's audio device. Browsers block sound autoplay in many cases: click **Enable / test alarm** to grant audio permission. The in-app volume control sets the web-audio gain, but actual loudness is also controlled by the browser and operating-system volume. Keep the page open. The sound is a convenience for this demo only, not a safety alert.
 
 ## Privacy and limitations
 
-- Camera snapshots and uploaded images are analyzed in memory. Uploaded videos are written to a temporary file during decoding and removed afterward.
-- Video fatigue indicators are heuristic estimates and depend on face visibility, lighting, camera angle, and sampling rate.
-- Streamlit Cloud's filesystem is temporary. Reports are provided as a CSV download rather than being saved permanently on the server.
+- Images are processed in memory. Video uses a temporary file while decoding and removes it afterward.
+- Reports are downloaded as CSV; Streamlit Cloud storage is ephemeral.
+- Results are heuristic and depend on lighting, face visibility, camera position, and video sampling.
 
-## Project files
+## Files
 
-- `app.py` — Streamlit interface, image/video input, visual results, and CSV export.
+- `app.py` — Streamlit interface, media analysis, visualization, alarm UI, and CSV export.
 - `detector.py` — MediaPipe Face Mesh setup and frame preprocessing.
 - `fatigue.py` — EAR, MAR, gaze, blink, yawn, and fatigue heuristics.
