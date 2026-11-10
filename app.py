@@ -1,234 +1,285 @@
-import streamlit as st
-import cv2
-import time
-import pygame
 import os
+import time
+import threading
+from datetime import datetime
+
+import av
+import cv2
 import numpy as np
 import pandas as pd
-from datetime import datetime
-from detector import initialize_face_mesh, process_frame
-from fatigue import FatigueDetector
+import streamlit as st
+import mediapipe as mp
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
-@st.cache_resource
-def load_alarm_sound():
-    if not pygame.mixer.get_init():
-        pygame.mixer.init(frequency=44100, size=-16, channels=1)
-    
-    if os.path.exists("alarm.wav"):
-        return pygame.mixer.Sound("alarm.wav")
-    else:
-        duration = 0.2
-        sample_rate = 44100
-        t = np.linspace(0, duration, int(sample_rate * duration), False)
-        tone = np.sin(2 * np.pi * 880.0 * t) * 0.4
-        sound_array = (tone * 32767).astype(np.int16)
-        return pygame.sndarray.make_sound(sound_array)
+st.set_page_config(page_title="AI Driver Monitoring", page_icon="🚗", layout="wide")
 
-alarm_sound = load_alarm_sound()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ALARM_PATH = os.path.join(BASE_DIR, "alarm.wav")
 
-# Page Setup
-st.set_page_config(page_title="AI Driver Monitoring System", layout="wide", initial_sidebar_state="expanded")
+# MediaPipe FaceMesh landmark indices
+LEFT_EYE = [362, 385, 387, 263, 373, 380]
+RIGHT_EYE = [33, 160, 158, 133, 153, 144]
 
-# UI Styling
-st.markdown("""
-    <style>
-    .stApp { background-color: #080c14; font-family: 'Inter', sans-serif; }
-    .main-header-container {
-        display: flex; align-items: center; justify-content: center;
-        background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-        border: 1px solid #1e293b; padding: 18px; border-radius: 16px; margin-bottom: 20px;
-    }
-    .main-header {
-        font-size: 26px; font-weight: 800;
-        background: linear-gradient(90deg, #38bdf8, #818cf8);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        letter-spacing: 2px; text-transform: uppercase;
-    }
-    .metric-card {
-        background: rgba(15, 23, 42, 0.75); border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 14px; padding: 16px 20px; margin-bottom: 14px;
-    }
-    .status-attentive {
-        background: rgba(16, 185, 129, 0.12); border: 1.5px solid #10b981; color: #34d399;
-        font-size: 18px; font-weight: 800; text-align: center; padding: 14px; border-radius: 12px; margin-bottom: 16px;
-    }
-    .status-drowsy {
-        background: rgba(239, 68, 68, 0.15); border: 1.5px solid #ef4444; color: #f87171;
-        font-size: 18px; font-weight: 800; text-align: center; padding: 14px; border-radius: 12px; margin-bottom: 16px;
-    }
-    .status-distracted {
-        background: rgba(245, 158, 11, 0.15); border: 1.5px solid #f59e0b; color: #fbbf24;
-        font-size: 18px; font-weight: 800; text-align: center; padding: 14px; border-radius: 12px; margin-bottom: 16px;
-    }
-    .card-label { color: #94a3b8; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-    .value-highlight { font-size: 30px; font-weight: 800; color: #38bdf8; }
-    .value-sub { font-size: 26px; font-weight: 700; color: #f3f4f6; }
-    .cam-off-box {
-        display: flex; flex-direction: column; align-items: center; justify-content: center;
-        height: 450px; background: rgba(15, 23, 42, 0.5); border: 2px dashed #1e293b;
-        border-radius: 16px; color: #64748b; font-size: 18px; font-weight: 600;
-    }
-    </style>
-""", unsafe_allow_html=True)
+RTC_CONFIG = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 
-# Header
-st.markdown('<div class="main-header-container"><div class="main-header">🚗 AI Driver Monitoring System</div></div>', unsafe_allow_html=True)
 
-# Sidebar
-st.sidebar.markdown("### ⚙️ Control Panel")
-cam_index = st.sidebar.number_input("Camera Source Index", value=0, step=1)
-start_system = st.sidebar.toggle("Start Camera Feed", value=False)
+def dist(a, b):
+    return float(np.linalg.norm(a - b))
 
-# Session State
-if "face_mesh" not in st.session_state:
-    st.session_state.face_mesh = initialize_face_mesh()
-if "detector" not in st.session_state:
-    st.session_state.detector = FatigueDetector()
-if "session_logs" not in st.session_state:
-    st.session_state.session_logs = []
-if "start_time" not in st.session_state:
-    st.session_state.start_time = None
-if "distraction_start_time" not in st.session_state:
-    st.session_state.distraction_start_time = None
 
-col_video, col_stats = st.columns([2.3, 1])
+def eye_aspect_ratio(p):
+    return (dist(p[1], p[5]) + dist(p[2], p[4])) / (2.0 * dist(p[0], p[3]) + 1e-6)
+
+
+class DriverProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+            max_num_faces=1,
+            refine_landmarks=False,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        self.lock = threading.Lock()
+
+        # Thresholds (changed from the sidebar)
+        self.ear_thr = 0.21
+        self.mar_thr = 0.60
+        self.sleep_secs = 1.5
+        self.away_secs = 2.0
+
+        # Internal timers / state
+        self.eye_closed_since = None
+        self.away_since = None
+        self.yawn_since = None
+        self.yawn_active = False
+
+        # Metrics
+        self.blinks = 0
+        self.yawns = 0
+        self.alerts = 0
+        self.status = "Starting..."
+        self.alarm = False
+        self.ear_val = 0.0
+        self.mar_val = 0.0
+        self.gaze = "Center"
+        self.events = []
+        self.started = time.time()
+
+    def _log(self, kind):
+        self.events.append(
+            {"time": datetime.now().strftime("%H:%M:%S"), "event": kind}
+        )
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        h, w = img.shape[:2]
+        now = time.time()
+
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        result = self.face_mesh.process(rgb)
+
+        status = "OK"
+        alarm = False
+        color = (0, 200, 0)
+        gaze = "Center"
+        ear = 0.0
+        mar = 0.0
+
+        if result.multi_face_landmarks:
+            lm = result.multi_face_landmarks[0].landmark
+            pts = np.array([[p.x * w, p.y * h] for p in lm])
+
+            # ---- Eye Aspect Ratio ----
+            ear = (eye_aspect_ratio(pts[LEFT_EYE]) + eye_aspect_ratio(pts[RIGHT_EYE])) / 2.0
+
+            # ---- Mouth Aspect Ratio ----
+            mar = dist(pts[13], pts[14]) / (dist(pts[78], pts[308]) + 1e-6)
+
+            # ---- Head direction (simple ratio method) ----
+            face_w = pts[454][0] - pts[234][0]
+            face_h = pts[152][1] - pts[10][1]
+            yaw_ratio = (pts[1][0] - pts[234][0]) / (face_w + 1e-6)
+            pitch_ratio = (pts[1][1] - pts[10][1]) / (face_h + 1e-6)
+
+            if yaw_ratio < 0.38:
+                gaze = "Left"
+            elif yaw_ratio > 0.62:
+                gaze = "Right"
+            elif pitch_ratio < 0.45:
+                gaze = "Up"
+            elif pitch_ratio > 0.72:
+                gaze = "Down"
+
+            # ---- Eyes closed / blink logic ----
+            if ear < self.ear_thr:
+                if self.eye_closed_since is None:
+                    self.eye_closed_since = now
+                closed_for = now - self.eye_closed_since
+                if closed_for >= self.sleep_secs:
+                    status = "DROWSY! WAKE UP"
+                    alarm = True
+            else:
+                if self.eye_closed_since is not None:
+                    if now - self.eye_closed_since < 0.5:
+                        self.blinks += 1
+                self.eye_closed_since = None
+
+            # ---- Yawn logic ----
+            if mar > self.mar_thr:
+                if self.yawn_since is None:
+                    self.yawn_since = now
+                if (now - self.yawn_since) >= 0.8 and not self.yawn_active:
+                    self.yawn_active = True
+                    self.yawns += 1
+                    self._log("Yawn")
+            else:
+                self.yawn_since = None
+                self.yawn_active = False
+
+            # ---- Distraction logic ----
+            if gaze != "Center":
+                if self.away_since is None:
+                    self.away_since = now
+                if now - self.away_since >= self.away_secs and not alarm:
+                    status = f"DISTRACTED ({gaze})"
+                    alarm = True
+            else:
+                self.away_since = None
+
+            if status == "OK" and self.yawn_active:
+                status = "Yawning (fatigue)"
+                color = (0, 165, 255)
+        else:
+            # No face found
+            self.eye_closed_since = None
+            if self.away_since is None:
+                self.away_since = now
+            if now - self.away_since >= self.away_secs:
+                status = "DRIVER NOT DETECTED"
+                alarm = True
+            else:
+                status = "Searching face..."
+
+        if alarm:
+            color = (0, 0, 255)
+
+        # ---- Update shared state ----
+        with self.lock:
+            if alarm and not self.alarm:
+                self.alerts += 1
+                self._log(status)
+            self.alarm = alarm
+            self.status = status
+            self.ear_val = ear
+            self.mar_val = mar
+            self.gaze = gaze
+
+        # ---- Draw overlay ----
+        cv2.rectangle(img, (0, 0), (w - 1, h - 1), color, 6 if alarm else 2)
+        cv2.putText(img, status, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+        cv2.putText(img, f"EAR {ear:.2f}  MAR {mar:.2f}  Gaze {gaze}", (15, h - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+
+def load_alarm_bytes():
+    if os.path.exists(ALARM_PATH):
+        with open(ALARM_PATH, "rb") as f:
+            return f.read()
+    return None
+
+
+# ------------------------------------------------------------------ UI
+st.title("🚗 AI Driver Monitoring & Safety System")
+st.caption("Camera allow karo, phir START dabao. Sound ke liye browser ki volume on rakho.")
+
+with st.sidebar:
+    st.header("⚙️ Settings")
+    ear_thr = st.slider("Eye closed threshold (EAR)", 0.10, 0.35, 0.21, 0.01)
+    mar_thr = st.slider("Yawn threshold (MAR)", 0.30, 1.00, 0.60, 0.05)
+    sleep_secs = st.slider("Eyes closed seconds for alarm", 0.5, 4.0, 1.5, 0.5)
+    away_secs = st.slider("Looking away seconds for alarm", 1.0, 6.0, 2.0, 0.5)
+
+col_video, col_info = st.columns([3, 2])
 
 with col_video:
-    video_placeholder = st.empty()
+    ctx = webrtc_streamer(
+        key="driver-monitor",
+        video_processor_factory=DriverProcessor,
+        media_stream_constraints={"video": {"width": 640, "height": 480}, "audio": False},
+        rtc_configuration=RTC_CONFIG,
+        async_processing=True,
+    )
 
-with col_stats:
-    status_placeholder = st.empty()
-    fatigue_placeholder = st.empty()
-    metrics_placeholder = st.empty()
-    gaze_placeholder = st.empty()
+with col_info:
+    status_ph = st.empty()
+    metrics_ph = st.empty()
+    audio_ph = st.empty()
 
-if start_system:
-    if st.session_state.start_time is None:
-        st.session_state.start_time = datetime.now()
-        st.session_state.session_logs = []  # Reset log for new session
+alarm_bytes = load_alarm_bytes()
 
-    cap = cv2.VideoCapture(cam_index)
-    prev_time = time.time()
+if "events" not in st.session_state:
+    st.session_state["events"] = []
 
-    while cap.isOpened() and start_system:
-        ret, frame = cap.read()
-        if not ret:
-            st.error("Failed to fetch camera feed.")
-            break
+if ctx.state.playing:
+    alarm_on = False
+    while ctx.state.playing:
+        vp = ctx.video_processor
+        if vp is None:
+            time.sleep(0.2)
+            continue
 
-        frame, results = process_frame(frame, st.session_state.face_mesh)
-        
-        curr_time = time.time()
-        fps = 1.0 / (curr_time - prev_time) if (curr_time - prev_time) > 0 else 30
-        prev_time = curr_time
+        vp.ear_thr = ear_thr
+        vp.mar_thr = mar_thr
+        vp.sleep_secs = sleep_secs
+        vp.away_secs = away_secs
 
-        if results.multi_face_landmarks:
-            landmarks = results.multi_face_landmarks[0].landmark
-            status_data = st.session_state.detector.process_landmarks(landmarks, frame.shape)
+        with vp.lock:
+            status = vp.status
+            alarm = vp.alarm
+            ear_v, mar_v, gaze = vp.ear_val, vp.mar_val, vp.gaze
+            blinks, yawns, alerts = vp.blinks, vp.yawns, vp.alerts
+            st.session_state["events"] = list(vp.events)
+        elapsed = int(time.time() - vp.started)
+
+        if alarm:
+            status_ph.error(f"🚨 {status}")
+        elif "Yawning" in status:
+            status_ph.warning(f"😮 {status}")
         else:
-            status_data = st.session_state.detector.process_landmarks(None, frame.shape)
+            status_ph.success(f"✅ {status}")
 
-        # Record Log Entry
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        st.session_state.session_logs.append({
-            "Time": timestamp,
-            "Status": status_data["status"],
-            "Gaze": status_data["gaze"],
-            "EAR": status_data["ear"],
-            "MAR": status_data["mar"],
-            "Fatigue Index": status_data["fatigue_index"]
-        })
+        with metrics_ph.container():
+            c1, c2 = st.columns(2)
+            c1.metric("EAR (eyes)", f"{ear_v:.2f}")
+            c2.metric("MAR (mouth)", f"{mar_v:.2f}")
+            c3, c4 = st.columns(2)
+            c3.metric("Blinks", blinks)
+            c4.metric("Yawns", yawns)
+            c5, c6 = st.columns(2)
+            c5.metric("Alerts", alerts)
+            c6.metric("Session (s)", elapsed)
+            st.write(f"**Head direction:** {gaze}")
 
-        # --- REALISTIC ALARM TRIGGER LOGIC ---
-        curr_status = status_data["status"]
-        
-        if curr_status == "DROWSY":
-            st.session_state.distraction_start_time = None
-            if not pygame.mixer.get_busy():
-                alarm_sound.play()
-                
-        elif curr_status in ["DISTRACTED", "NO FACE DETECTED"]:
-            if st.session_state.distraction_start_time is None:
-                st.session_state.distraction_start_time = time.time()
-            elif time.time() - st.session_state.distraction_start_time > 1.5:
-                if not pygame.mixer.get_busy():
-                    alarm_sound.play()
-        else:
-            st.session_state.distraction_start_time = None
-            pygame.mixer.stop()
+        # Alarm sound (played in the visitor's browser)
+        if alarm and not alarm_on and alarm_bytes:
+            audio_ph.audio(alarm_bytes, format="audio/wav", autoplay=True, loop=True)
+            alarm_on = True
+        elif not alarm and alarm_on:
+            audio_ph.empty()
+            alarm_on = False
 
-        # Render FPS
-        cv2.putText(frame, f"FPS: {fps:.1f}", (frame.shape[1] - 150, 35),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
+        time.sleep(0.3)
 
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        video_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
-
-        # Dynamic Status UI
-        if status_data["status"] == "DROWSY":
-            status_placeholder.markdown('<div class="status-drowsy">🚨 STATUS: DROWSY / SLEEPING!</div>', unsafe_allow_html=True)
-        elif status_data["status"] == "DISTRACTED":
-            status_placeholder.markdown('<div class="status-distracted">⚠️ STATUS: DISTRACTED!</div>', unsafe_allow_html=True)
-        elif status_data["status"] == "NO FACE DETECTED":
-            status_placeholder.markdown('<div class="status-distracted">⚠️ WARNING: NO FACE DETECTED!</div>', unsafe_allow_html=True)
-        else:
-            status_placeholder.markdown('<div class="status-attentive">✅ STATUS: ATTENTIVE</div>', unsafe_allow_html=True)
-
-        # Dynamic Cards UI
-        fatigue_placeholder.markdown(f'<div class="metric-card"><div class="card-label">Fatigue Index</div><div class="value-highlight">{status_data["fatigue_index"]:.2f}</div></div>', unsafe_allow_html=True)
-        metrics_placeholder.markdown(f'<div style="display: flex; gap: 12px;"><div class="metric-card" style="flex: 1;"><div class="card-label">Blinks</div><div class="value-sub">{status_data["blinks"]}</div></div><div class="metric-card" style="flex: 1;"><div class="card-label">Yawns</div><div class="value-sub">{status_data["yawns"]}</div></div></div>', unsafe_allow_html=True)
-        gaze_placeholder.markdown(f'<div class="metric-card"><div class="card-label">Gaze Tracking</div><div class="value-highlight">{status_data["gaze"]}</div></div>', unsafe_allow_html=True)
-
-    cap.release()
-
-else:
-    # Idle Screen
-    video_placeholder.markdown('''
-        <div class="cam-off-box">
-            <p>📷 Camera is currently OFF</p>
-            <p style="font-size: 14px; color: #475569;">Toggle 'Start Camera Feed' in sidebar to begin</p>
-        </div>
-    ''', unsafe_allow_html=True)
-
-    status_placeholder.markdown('<div class="status-attentive" style="border-color:#334155; color:#94a3b8; background:rgba(30,41,59,0.3);">⏸️ SYSTEM IDLE</div>', unsafe_allow_html=True)
-    fatigue_placeholder.markdown('<div class="metric-card"><div class="card-label">Fatigue Index</div><div class="value-highlight">0.00</div></div>', unsafe_allow_html=True)
-    metrics_placeholder.markdown('<div style="display: flex; gap: 12px;"><div class="metric-card" style="flex: 1;"><div class="card-label">Blinks</div><div class="value-sub">0</div></div><div class="metric-card" style="flex: 1;"><div class="card-label">Yawns</div><div class="value-sub">0</div></div></div>', unsafe_allow_html=True)
-    gaze_placeholder.markdown('<div class="metric-card"><div class="card-label">Gaze Tracking</div><div class="value-highlight">OFF</div></div>', unsafe_allow_html=True)
-
-    # GENERATE REPORT SECTION WHEN CAMERA STOPS
-    if len(st.session_state.session_logs) > 0:
-        st.markdown("---")
-        st.subheader("📊 Session Analytics & Trip Report")
-
-        df = pd.DataFrame(st.session_state.session_logs)
-        
-        total_frames = len(df)
-        drowsy_count = len(df[df["Status"] == "DROWSY"])
-        distracted_count = len(df[df["Status"] == "DISTRACTED"])
-        avg_fatigue = df["Fatigue Index"].mean()
-
-        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
-        col_r1.metric("Total Recorded Frames", total_frames)
-        col_r2.metric("Drowsy Events", drowsy_count)
-        col_r3.metric("Distraction Events", distracted_count)
-        col_r4.metric("Avg Fatigue Score", f"{avg_fatigue:.2f}")
-
-        os.makedirs("reports", exist_ok=True)
-        report_filename = f"reports/driver_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        df.to_csv(report_filename, index=False)
-
-        csv_data = df.to_csv(index=False).encode('utf-8')
-        
-        col_btn1, col_btn2 = st.columns([1, 2])
-        with col_btn1:
-            st.download_button(
-                label="📥 Download Session Report (CSV)",
-                data=csv_data,
-                file_name=os.path.basename(report_filename),
-                mime="text/csv"
-            )
-        with col_btn2:
-            st.success(f"✅ Report Auto-saved locally to `{report_filename}`")
-
-        with st.expander("🔍 View Raw Log Data"):
-            st.dataframe(df, use_container_width=True)
+# Report section (shown when camera is stopped)
+if not ctx.state.playing and st.session_state["events"]:
+    st.subheader("📄 Session Report")
+    df = pd.DataFrame(st.session_state["events"])
+    st.dataframe(df, use_container_width=True)
+    st.download_button(
+        "⬇️ Download report (CSV)",
+        df.to_csv(index=False).encode("utf-8"),
+        file_name="driver_session_report.csv",
+        mime="text/csv",
+    )
